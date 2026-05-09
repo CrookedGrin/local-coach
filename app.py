@@ -23,11 +23,9 @@ parser = argparse.ArgumentParser(description="Local Voice Assistant with Chatter
 parser.add_argument("--voice", type=str, help="Path to voice sample for cloning")
 parser.add_argument("--exaggeration", type=float, default=0.5, help="Emotion exaggeration (0.0-1.0)")
 parser.add_argument("--cfg-weight", type=float, default=0.5, help="CFG weight for pacing (0.0-1.0)")
-parser.add_argument("--model", type=str, default=None, help="LLM model name (default: gemma3 for ollama, MiniMax-M2.7 for minimax)")
-parser.add_argument("--provider", type=str, default="ollama", choices=["ollama", "minimax"],
-                    help="LLM provider: 'ollama' for local models, 'minimax' for MiniMax cloud API (default: ollama)")
-parser.add_argument("--api-key", type=str, default=None, help="API key for cloud LLM providers (or set MINIMAX_API_KEY env var)")
-parser.add_argument("--temperature", type=float, default=0.7, help="LLM temperature (default: 0.7)")
+parser.add_argument("--model", type=str, default=None, help="Ollama model name (default: coach)")
+parser.add_argument("--provider", type=str, default="ollama", choices=["ollama"],
+                    help="LLM provider: only 'ollama' (local). Cloud providers removed to keep chat data local.")
 parser.add_argument("--save-voice", action="store_true", help="Save generated voice samples")
 args = parser.parse_args()
 
@@ -35,45 +33,25 @@ args = parser.parse_args()
 tts = TextToSpeechService()
 
 
-def create_llm(provider: str, model: str | None = None, api_key: str | None = None, temperature: float = 0.7):
+def create_llm(provider: str, model: str | None = None):
     """
-    Create an LLM instance based on the selected provider.
+    Create a local LLM instance.
 
     Args:
-        provider: LLM provider name ('ollama' or 'minimax').
-        model: Model name. Defaults to 'gemma3' for ollama, 'MiniMax-M2.7' for minimax.
-        api_key: API key for cloud providers (or set MINIMAX_API_KEY env var).
-        temperature: LLM temperature (default: 0.7).
+        provider: LLM provider name. Only 'ollama' is supported — cloud providers
+            were removed so chat data cannot leave the machine.
+        model: Ollama model name. Defaults to 'coach'.
 
     Returns:
-        A LangChain LLM or ChatModel instance.
+        A LangChain LLM instance backed by a local Ollama server.
     """
     if provider == "ollama":
-        return OllamaLLM(model=model or "gemma3", base_url="http://localhost:11434")
-    elif provider == "minimax":
-        from langchain_openai import ChatOpenAI
-
-        resolved_key = api_key or os.environ.get("MINIMAX_API_KEY")
-        if not resolved_key:
-            raise ValueError(
-                "MiniMax API key is required. Set the MINIMAX_API_KEY environment "
-                "variable or pass --api-key on the command line."
-            )
-        # MiniMax temperature must be in (0.0, 1.0]
-        clamped_temperature = max(0.01, min(1.0, temperature))
-        return ChatOpenAI(
-            model=model or "MiniMax-M2.7",
-            base_url="https://api.minimax.io/v1",
-            api_key=resolved_key,
-            temperature=clamped_temperature,
-        )
-    else:
-        raise ValueError(f"Unknown provider: {provider}. Supported: ollama, minimax")
+        return OllamaLLM(model=model or "coach", base_url="http://localhost:11434")
+    raise ValueError(f"Unknown provider: {provider}. Supported: ollama")
 
 
-# Modern prompt template using ChatPromptTemplate
+# System prompt is owned by the Modelfile (see ./Modelfile). Don't duplicate it here.
 prompt_template = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful and friendly AI assistant. You are polite, respectful, and aim to provide concise responses of less than 20 words."),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}")
 ])
@@ -82,12 +60,8 @@ prompt_template = ChatPromptTemplate.from_messages([
 llm = create_llm(
     provider=args.provider,
     model=args.model,
-    api_key=args.api_key,
-    temperature=args.temperature,
 )
 
-# Create the chain with modern LCEL syntax
-# StrOutputParser normalizes output across providers (string from Ollama, AIMessage from ChatOpenAI)
 chain = prompt_template | llm | StrOutputParser()
 
 # Chat history storage
@@ -214,7 +188,7 @@ if __name__ == "__main__":
 
     console.print(f"[blue]Emotion exaggeration: {args.exaggeration}")
     console.print(f"[blue]CFG weight: {args.cfg_weight}")
-    console.print(f"[blue]LLM model: {args.model or ('gemma3' if args.provider == 'ollama' else 'MiniMax-M2.7')}")
+    console.print(f"[blue]LLM model: {args.model or 'coach'}")
     console.print(f"[blue]LLM provider: {args.provider}")
     console.print("[cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     console.print("[cyan]Press Ctrl+C to exit.\n")

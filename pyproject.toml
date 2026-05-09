@@ -7,7 +7,6 @@ requires-python = ">=3.11"
 dependencies = [
     "chatterbox-tts>=0.1.1",
     "langchain-ollama>=0.3.3",
-    "langchain-openai>=0.3.0",
     "langchain>=0.3.25",
     "nltk>=3.9.1",
     "openai-whisper>=20240930",
@@ -22,3 +21,6 @@ dependencies = [
 dev = [
     "pre-commit>=4.2.0",
 ]
+
+[tool.uv.extra-build-dependencies]
+"openai-whisper" = ["setuptools"]
