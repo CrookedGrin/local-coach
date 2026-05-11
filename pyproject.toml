@@ -1,20 +1,19 @@
 [project]
-name = "local-talking-llm"
+name = "local-coach"
 version = "0.1.0"
-description = "Add your description here"
+description = "A private, locally-running personal coaching tool that runs an open-source AI model and uses TTS."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
-    "chatterbox-tts>=0.1.1",
+    "en-core-web-sm",
     "langchain-ollama>=0.3.3",
     "langchain>=0.3.25",
-    "nltk>=3.9.1",
+    "misaki[en]>=0.9.4",
+    "mlx-audio>=0.2.7",
     "openai-whisper>=20240930",
-    "peft>=0.15.2",
     "rich>=14.0.0",
     "setuptools>=80.9.0",
     "sounddevice>=0.5.2",
-    "torchaudio>=2.6.0",
 ]
 
 [dependency-groups]
@@ -24,3 +23,6 @@ dev = [
 
 [tool.uv.extra-build-dependencies]
 "openai-whisper" = ["setuptools"]
+
+[tool.uv.sources]
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }

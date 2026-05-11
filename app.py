@@ -1,36 +1,79 @@
+import os
+
+# HuggingFace caches the Kokoro snapshot in ~/.cache/huggingface. Once it's
+# present, skip the per-launch revision check (the "Fetching 63 files" scan)
+# by forcing offline mode. Set LOCAL_COACH_HF_ONLINE=1 to override (e.g. to
+# pull a newer model revision).
+if os.environ.get("LOCAL_COACH_HF_ONLINE") != "1":
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
+# Suppress loky's "leaked semaphore" warning at shutdown. We use os._exit on
+# Ctrl+C to avoid an MLX/Metal teardown crash, which skips loky's atexit
+# cleanup. The warning is cosmetic — the OS reclaims the semaphore anyway.
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message=r"resource_tracker: There appear to be \d+ leaked semaphore",
+)
+
 import time
 import threading
+import re
+import subprocess
 import numpy as np
 import whisper
 import sounddevice as sd
 import argparse
-import os
 from queue import Queue
 from rich.console import Console
 # Updated imports for modern LangChain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_core.chat_history import InMemoryChatMessageHistory
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_ollama import OllamaLLM
-from tts import TextToSpeechService
+from tts import KokoroTTS
 
 console = Console()
-stt = whisper.load_model("base.en")
+stt = whisper.load_model("tiny.en")
 
 # Parse command line arguments
-parser = argparse.ArgumentParser(description="Local Voice Assistant with ChatterBox TTS")
-parser.add_argument("--voice", type=str, help="Path to voice sample for cloning")
-parser.add_argument("--exaggeration", type=float, default=0.5, help="Emotion exaggeration (0.0-1.0)")
-parser.add_argument("--cfg-weight", type=float, default=0.5, help="CFG weight for pacing (0.0-1.0)")
+parser = argparse.ArgumentParser(description="Local Voice Assistant (Kokoro TTS)")
 parser.add_argument("--model", type=str, default=None, help="Ollama model name (default: coach)")
 parser.add_argument("--provider", type=str, default="ollama", choices=["ollama"],
                     help="LLM provider: only 'ollama' (local). Cloud providers removed to keep chat data local.")
-parser.add_argument("--save-voice", action="store_true", help="Save generated voice samples")
+parser.add_argument("--no-tts", action="store_true", help="Disable TTS (alias for --tts none)")
+parser.add_argument("--tts", type=str, default=None, choices=["none", "kokoro", "say"],
+                    help="TTS backend: 'none' (text only), 'kokoro' (MLX, default), 'say' (macOS built-in)")
+parser.add_argument("--kokoro-voice", type=str,
+                    default=os.environ.get("LOCAL_COACH_KOKORO_VOICE", "bf_emma"),
+                    help="Kokoro voice id (e.g. bf_emma, af_heart, am_adam). "
+                         "Defaults to $LOCAL_COACH_KOKORO_VOICE or 'bf_emma'.")
+parser.add_argument("--kokoro-speed", type=float, default=1.0, help="Kokoro speed multiplier")
+parser.add_argument("--say-voice", type=str, default=None, help="macOS 'say' voice name (e.g. 'Samantha', 'Daniel')")
+parser.add_argument("--say-rate", type=int, default=None, help="macOS 'say' words-per-minute rate (default ~175)")
+parser.add_argument("--debug", action="store_true", help="Print timing info for each pipeline stage")
 args = parser.parse_args()
 
-# Initialize TTS with ChatterBox
-tts = TextToSpeechService()
+# Resolve TTS mode: explicit --tts wins; otherwise --no-tts → 'none'; default kokoro.
+if args.tts is not None:
+    tts_mode = args.tts
+elif args.no_tts:
+    tts_mode = "none"
+else:
+    tts_mode = "kokoro"
+
+def dlog(msg: str) -> None:
+    """Debug log with monotonic timestamp."""
+    if args.debug:
+        console.print(f"[dim][{time.monotonic():8.2f}s] {msg}[/dim]")
+
+# Load Kokoro only if it's the selected backend (model load is non-trivial).
+tts = (
+    KokoroTTS(default_voice=args.kokoro_voice, speed=args.kokoro_speed)
+    if tts_mode == "kokoro"
+    else None
+)
 
 
 def create_llm(provider: str, model: str | None = None):
@@ -64,22 +107,8 @@ llm = create_llm(
 
 chain = prompt_template | llm | StrOutputParser()
 
-# Chat history storage
-chat_sessions = {}
-
-def get_session_history(session_id: str) -> InMemoryChatMessageHistory:
-    """Get or create chat history for a session."""
-    if session_id not in chat_sessions:
-        chat_sessions[session_id] = InMemoryChatMessageHistory()
-    return chat_sessions[session_id]
-
-# Create the runnable with message history
-chain_with_history = RunnableWithMessageHistory(
-    chain,
-    get_session_history,
-    input_messages_key="input",
-    history_messages_key="history",
-)
+# In-memory conversation history (list of HumanMessage / AIMessage)
+chat_history: list = []
 
 def record_audio(stop_event, data_queue):
     """
@@ -114,90 +143,217 @@ def transcribe(audio_np: np.ndarray) -> str:
     Returns:
         str: The transcribed text.
     """
+    t0 = time.monotonic()
     result = stt.transcribe(audio_np, fp16=False)  # Set fp16=True if using a GPU
     text = result["text"].strip()
+    dlog(f"whisper transcribe ({audio_np.size / 16000:.2f}s audio) in {time.monotonic() - t0:.2f}s")
     return text
 
 
 def get_llm_response(text: str) -> str:
+    chat_history.append(HumanMessage(content=text))
+    response = chain.invoke({"history": chat_history[:-1], "input": text})
+    result = response.strip()
+    chat_history.append(AIMessage(content=result))
+    return result
+
+
+_SENTENCE_END = re.compile(r"([.!?])(\s+|$)")
+
+# Markdown decorations Kokoro would otherwise read aloud (e.g. "asterisk").
+_MD_EMPHASIS = re.compile(r"(\*\*|\*|__|_|`)(.+?)\1")
+_MD_STRAY = re.compile(r"[*_`#>]+")
+
+
+def strip_markdown_for_tts(text: str) -> str:
+    """Remove markdown decorations so Kokoro doesn't pronounce them literally."""
+    text = _MD_EMPHASIS.sub(r"\2", text)
+    text = _MD_STRAY.sub("", text)
+    return text
+
+
+def stream_sentences(text_iter):
     """
-    Generates a response to the given text using the language model.
-
-    Args:
-        text (str): The input text to be processed.
-
-    Returns:
-        str: The generated response.
+    Consume an iterator of text chunks and yield complete sentences as soon as
+    a terminal punctuation boundary is seen. Trailing partial text is yielded last.
     """
-    # Use a default session ID for this simple voice assistant
-    session_id = "voice_assistant_session"
+    buf = ""
+    for chunk in text_iter:
+        if not chunk:
+            continue
+        buf += chunk
+        while True:
+            m = _SENTENCE_END.search(buf)
+            if not m:
+                break
+            end = m.end()
+            sentence = buf[:end].strip()
+            buf = buf[end:]
+            if sentence:
+                yield sentence
+    tail = buf.strip()
+    if tail:
+        yield tail
 
-    # Invoke the chain with history
-    response = chain_with_history.invoke(
-        {"input": text},
-        config={"session_id": session_id}
-    )
 
-    # The response is now a string from the LLM, no need to remove "Assistant:" prefix
-    # since we're using a proper chat model setup
-    return response.strip()
+def stream_llm_to_text(text: str) -> str:
+    """Stream LLM tokens directly to the console as they arrive. Returns the full text."""
+    chat_history.append(HumanMessage(content=text))
+    parts: list[str] = []
+    console.print("[cyan]Assistant: ", end="")
+    dlog("Fetching LLM response...")
+    t_start = time.monotonic()
+    first_token_logged = False
+    for chunk in chain.stream({"history": chat_history[:-1], "input": text}):
+        if not chunk:
+            continue
+        if not first_token_logged:
+            dlog(f"LLM first token after {time.monotonic() - t_start:.2f}s")
+            first_token_logged = True
+        parts.append(chunk)
+        console.print(chunk, end="", highlight=False, markup=False)
+    console.print("")
+    dlog(f"LLM full response in {time.monotonic() - t_start:.2f}s ({len(''.join(parts))} chars)")
+    result = "".join(parts).strip()
+    chat_history.append(AIMessage(content=result))
+    return result
 
 
-def play_audio(sample_rate, audio_array):
+def stream_llm_to_say(text: str, say_voice: str | None, say_rate: int | None) -> str:
     """
-    Plays the given audio data using the sounddevice library.
-
-    Args:
-        sample_rate (int): The sample rate of the audio data.
-        audio_array (numpy.ndarray): The audio data to be played.
-
-    Returns:
-        None
+    Stream LLM tokens, segment into sentences, and speak each via macOS `say`.
+    Sentences queue and play sequentially; LLM keeps generating in the background.
     """
-    sd.play(audio_array, sample_rate)
-    sd.wait()
+    chat_history.append(HumanMessage(content=text))
+    speak_queue: Queue = Queue()
+    full_text_parts: list[str] = []
+    t_start = time.monotonic()
+
+    def producer():
+        try:
+            first_token_logged = False
+            first_sentence_logged = False
+            def chunked():
+                nonlocal first_token_logged
+                for chunk in chain.stream({"history": chat_history[:-1], "input": text}):
+                    if chunk and not first_token_logged:
+                        dlog(f"LLM first token after {time.monotonic() - t_start:.2f}s")
+                        first_token_logged = True
+                    yield chunk
+            for sentence in stream_sentences(chunked()):
+                if not first_sentence_logged:
+                    dlog(f"first sentence ready after {time.monotonic() - t_start:.2f}s: {sentence!r}")
+                    first_sentence_logged = True
+                full_text_parts.append(sentence + " ")
+                speak_queue.put(sentence)
+            dlog(f"LLM full response in {time.monotonic() - t_start:.2f}s")
+        finally:
+            speak_queue.put(None)
+
+    def consumer():
+        first_play_logged = False
+        while True:
+            sentence = speak_queue.get()
+            if sentence is None:
+                return
+            console.print(f"[cyan]Assistant: {sentence}")
+            cmd = ["say"]
+            if say_voice:
+                cmd += ["-v", say_voice]
+            if say_rate is not None:
+                cmd += ["-r", str(say_rate)]
+            cmd += [strip_markdown_for_tts(sentence)]
+            t_say = time.monotonic()
+            subprocess.run(cmd, check=False)
+            if not first_play_logged:
+                dlog(f"first audio finished {time.monotonic() - t_start:.2f}s after request "
+                     f"(say took {time.monotonic() - t_say:.2f}s)")
+                first_play_logged = True
+
+    prod = threading.Thread(target=producer, daemon=True)
+    cons = threading.Thread(target=consumer, daemon=True)
+    prod.start()
+    cons.start()
+    prod.join()
+    cons.join()
+
+    result = "".join(full_text_parts).strip()
+    chat_history.append(AIMessage(content=result))
+    return result
 
 
-def analyze_emotion(text: str) -> float:
+def stream_llm_to_kokoro(text: str, voice: str) -> str:
     """
-    Simple emotion analysis to dynamically adjust exaggeration.
-    Returns a value between 0.3 and 0.9 based on text content.
+    Stream LLM tokens on a background thread, segment into sentences, and run
+    Kokoro synthesis + playback on the main thread. MLX streams are tied to
+    the thread that loaded the model, so all `mx.*` calls must happen here.
     """
-    # Keywords that suggest more emotion
-    emotional_keywords = ['amazing', 'terrible', 'love', 'hate', 'excited', 'sad', 'happy', 'angry', 'wonderful', 'awful', '!', '?!', '...']
+    chat_history.append(HumanMessage(content=text))
+    sentence_queue: Queue = Queue()
+    full_text_parts: list[str] = []
+    t_start = time.monotonic()
 
-    emotion_score = 0.5  # Default neutral
+    def llm_worker():
+        try:
+            dlog("Fetching LLM response...")
+            first_token_logged = False
+            def chunked():
+                nonlocal first_token_logged
+                for chunk in chain.stream({"history": chat_history[:-1], "input": text}):
+                    if chunk and not first_token_logged:
+                        dlog(f"LLM first token after {time.monotonic() - t_start:.2f}s")
+                        first_token_logged = True
+                    yield chunk
+            for sentence in stream_sentences(chunked()):
+                full_text_parts.append(sentence + " ")
+                sentence_queue.put(sentence)
+        finally:
+            sentence_queue.put(None)
 
-    text_lower = text.lower()
-    for keyword in emotional_keywords:
-        if keyword in text_lower:
-            emotion_score += 0.1
+    worker = threading.Thread(target=llm_worker, daemon=True)
+    worker.start()
 
-    # Cap between 0.3 and 0.9
-    return min(0.9, max(0.3, emotion_score))
+    first_play_logged = False
+    while True:
+        sentence = sentence_queue.get()
+        if sentence is None:
+            break
+        spoken = strip_markdown_for_tts(sentence)
+        t_tts = time.monotonic()
+        sample_rate, audio_array = tts.synthesize(spoken, voice=voice)
+        dlog(f"Kokoro sentence ({len(sentence)} chars) in {time.monotonic() - t_tts:.2f}s")
+        console.print(f"[cyan]Assistant: {sentence}")
+        if not first_play_logged:
+            dlog(f"first playback starting at {time.monotonic() - t_start:.2f}s")
+            first_play_logged = True
+        sd.play(audio_array, sample_rate)
+        sd.wait()
+
+    worker.join()
+    result = "".join(full_text_parts).strip()
+    chat_history.append(AIMessage(content=result))
+    return result
 
 
 if __name__ == "__main__":
-    console.print("[cyan]🤖 Local Voice Assistant with ChatterBox TTS")
+    console.print("[cyan]🤖 Local Voice Assistant (Kokoro TTS)")
     console.print("[cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-    if args.voice:
-        console.print(f"[green]Using voice cloning from: {args.voice}")
+    if tts_mode == "none":
+        console.print("[yellow]TTS disabled — assistant replies will stream as text")
+    elif tts_mode == "say":
+        v = args.say_voice or "system default"
+        r = args.say_rate if args.say_rate is not None else "default"
+        console.print(f"[green]TTS: macOS 'say' (voice: {v}, rate: {r})")
     else:
-        console.print("[yellow]Using default voice (no cloning)")
+        console.print(f"[green]TTS: Kokoro (voice: {args.kokoro_voice}, speed: {args.kokoro_speed})")
 
-    console.print(f"[blue]Emotion exaggeration: {args.exaggeration}")
-    console.print(f"[blue]CFG weight: {args.cfg_weight}")
     console.print(f"[blue]LLM model: {args.model or 'coach'}")
     console.print(f"[blue]LLM provider: {args.provider}")
+    if args.debug:
+        console.print("[magenta]Debug timing enabled")
     console.print("[cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     console.print("[cyan]Press Ctrl+C to exit.\n")
-
-    # Create voices directory if saving voices
-    if args.save_voice:
-        os.makedirs("voices", exist_ok=True)
-
-    response_count = 0
 
     try:
         while True:
@@ -227,33 +383,16 @@ if __name__ == "__main__":
                     text = transcribe(audio_np)
                 console.print(f"[yellow]You: {text}")
 
-                with console.status("Generating response...", spinner="dots"):
-                    response = get_llm_response(text)
-
-                    # Analyze emotion and adjust exaggeration dynamically
-                    dynamic_exaggeration = analyze_emotion(response)
-
-                    # Use lower cfg_weight for more expressive responses
-                    dynamic_cfg = args.cfg_weight * 0.8 if dynamic_exaggeration > 0.6 else args.cfg_weight
-
-                    sample_rate, audio_array = tts.long_form_synthesize(
-                        response,
-                        audio_prompt_path=args.voice,
-                        exaggeration=dynamic_exaggeration,
-                        cfg_weight=dynamic_cfg
+                if tts_mode == "none":
+                    response = stream_llm_to_text(text)
+                elif tts_mode == "say":
+                    response = stream_llm_to_say(
+                        text,
+                        say_voice=args.say_voice,
+                        say_rate=args.say_rate,
                     )
-
-                console.print(f"[cyan]Assistant: {response}")
-                console.print(f"[dim](Emotion: {dynamic_exaggeration:.2f}, CFG: {dynamic_cfg:.2f})[/dim]")
-
-                # Save voice sample if requested
-                if args.save_voice:
-                    response_count += 1
-                    filename = f"voices/response_{response_count:03d}.wav"
-                    tts.save_voice_sample(response, filename, args.voice)
-                    console.print(f"[dim]Voice saved to: {filename}[/dim]")
-
-                play_audio(sample_rate, audio_array)
+                else:
+                    response = stream_llm_to_kokoro(text, voice=args.kokoro_voice)
             else:
                 console.print(
                     "[red]No audio recorded. Please ensure your microphone is working."
@@ -261,5 +400,6 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         console.print("\n[red]Exiting...")
+        os._exit(0)
 
-    console.print("[blue]Session ended. Thank you for using ChatterBox Voice Assistant!")
+    console.print("[blue]Session ended.")
