@@ -9,14 +9,16 @@ A private, voice-driven personal coach that runs entirely on your Mac. You talk,
 ```mermaid
 flowchart LR
     A[🎤 Microphone] --> B[Whisper tiny.en<br/>speech-to-text]
+    K[⌨️ Keyboard] --> C
     B --> C[Ollama 'coach' model<br/>qwen3:8b + Modelfile prompt]
     C -->|streamed sentence by sentence| D[Kokoro-82M on MLX<br/>text-to-speech]
     D --> E[🔊 Speakers]
+    C -.->|--no-tts| T[🖥️ Terminal text]
 ```
 
-1. Press Enter to start recording and Enter again to stop. [Whisper](https://github.com/openai/whisper) transcribes the clip.
+1. At the prompt, either type a message or press Enter to start recording and Enter again to stop. [Whisper](https://github.com/openai/whisper) transcribes recordings.
 2. The transcript and the conversation so far go to a local [Ollama](https://ollama.com) model through LangChain. The default `coach` model is `qwen3:8b` with the coaching system prompt and parameters defined in [`Modelfile`](Modelfile).
-3. The reply streams back token by token. As each sentence completes, it is spoken by [Kokoro](https://huggingface.co/prince-canuma/Kokoro-82M) via [mlx-audio](https://github.com/Blaizzy/mlx-audio), so playback starts before the full reply has been generated. Markdown is stripped before speaking.
+3. The reply streams back token by token. As each sentence completes, it is spoken by [Kokoro](https://huggingface.co/prince-canuma/Kokoro-82M) via [mlx-audio](https://github.com/Blaizzy/mlx-audio), so playback starts before the full reply has been generated. Markdown is stripped before speaking. With `--no-tts`, the reply is printed instead.
 
 Conversation history is held in memory only and is gone when the app exits.
 
@@ -69,6 +71,19 @@ python scripts/download_models.py
 uv run python app.py
 ```
 
+Input and output are independent, so you can use any combination:
+
+| You want | Run |
+|---|---|
+| Talk, hear replies | `uv run python app.py` |
+| Type, hear replies | the same; type at the prompt instead of pressing Enter |
+| Talk, read replies | `uv run python app.py --no-tts` |
+| Type, read replies | `uv run python app.py --input text --no-tts` |
+
+In the default voice mode you can mix typing and speaking turn by turn. `--input text` is keyboard only: it skips loading Whisper and never opens the microphone, so macOS won't ask for mic access. To make a combination your default, set `LOCAL_COACH_INPUT` and `LOCAL_COACH_TTS` (see [Configuration](#configuration)).
+
+More options:
+
 ```bash
 uv run python app.py --kokoro-voice af_heart --kokoro-speed 1.1   # different Kokoro voice
 uv run python app.py --tts say --say-voice Samantha                  # macOS built-in TTS
@@ -77,23 +92,26 @@ uv run python app.py --model qwen3:8b                                # skip the 
 uv run python app.py --debug                                         # per-stage timings
 ```
 
-Press Ctrl+C to quit.
+Press Ctrl+C (or Ctrl+D at the prompt) to quit.
 
 ### Configuration
 
 Command-line flags:
 
 - `--model`: Ollama model to use (default: `coach`, built from `Modelfile`)
+- `--input`: `voice` (default; type a message or press Enter to record) or `text` (keyboard only, no Whisper or microphone)
 - `--tts`: `kokoro` (default), `say` (macOS), or `none`; `--no-tts` is an alias for `none`
 - `--kokoro-voice`: Kokoro voice id (default: `bf_emma`). The prefix sets the accent: `af_`/`am_` American, `bf_`/`bm_` British. The full list is in the [voices folder](https://huggingface.co/prince-canuma/Kokoro-82M/tree/main/voices).
 - `--kokoro-speed`: Kokoro speed multiplier (default: `1.0`)
 - `--say-voice`, `--say-rate`: voice and words-per-minute for `--tts say` (list voices with `say -v '?'`)
 - `--debug`: print timing for each pipeline stage
 
-Environment variables (export them in your shell; the app does not read a `.env` file):
+Environment variables set your defaults; a command-line flag always overrides them. Export them in your shell profile (e.g. `~/.zshrc`); the app does not read a `.env` file.
 
 | Variable | Default | Effect |
 |---|---|---|
+| `LOCAL_COACH_INPUT` | `voice` | Default for `--input` (`voice` or `text`) |
+| `LOCAL_COACH_TTS` | `kokoro` | Default for `--tts` (`kokoro`, `say` or `none`) |
 | `LOCAL_COACH_KOKORO_VOICE` | `bf_emma` | Default for `--kokoro-voice` |
 | `LOCAL_COACH_HF_ONLINE` | unset | Set to `1` to allow Hugging Face network access, e.g. to pull a newer Kokoro revision |
 

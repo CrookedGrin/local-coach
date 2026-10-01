@@ -1,8 +1,10 @@
 """Unit tests for app.py.
 
-app.py loads Whisper and parses sys.argv at import time, so we import it once
-with Whisper's loader stubbed and --no-tts (which skips Kokoro). No model
-weights are loaded and no Ollama server is contacted.
+app.py parses sys.argv and loads models at import time, so we import it once
+with --no-tts --input text (which skip Kokoro and Whisper) and Whisper's loader
+stubbed as a backstop. LOCAL_COACH_* variables from the developer's shell are
+cleared so they can't change the result. No model weights are loaded and no
+Ollama server is contacted.
 """
 
 import importlib
@@ -15,8 +17,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 def _import_app():
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LOCAL_COACH_")}
     with patch("whisper.load_model", return_value=MagicMock()), \
-            patch("sys.argv", ["app.py", "--no-tts"]):
+            patch.dict("os.environ", env, clear=True), \
+            patch("sys.argv", ["app.py", "--no-tts", "--input", "text"]):
         sys.modules.pop("app", None)
         return importlib.import_module("app")
 
@@ -123,6 +127,74 @@ class TestStreamLlmToText(unittest.TestCase):
         second_call = fake_chain.stream.call_args_list[1].args[0]
         self.assertEqual(second_call["input"], "two")
         self.assertEqual([m.content for m in second_call["history"]], ["one", "First."])
+
+
+class TestResolveMode(unittest.TestCase):
+    """Tests for resolve_mode(): flag beats environment variable beats default."""
+
+    def test_flag_wins_over_env(self):
+        with patch.dict("os.environ", {"LOCAL_COACH_INPUT": "voice"}):
+            self.assertEqual(
+                app.resolve_mode("text", "LOCAL_COACH_INPUT", app.INPUT_MODES, "voice"), "text"
+            )
+
+    def test_env_used_when_no_flag(self):
+        with patch.dict("os.environ", {"LOCAL_COACH_TTS": "none"}):
+            self.assertEqual(
+                app.resolve_mode(None, "LOCAL_COACH_TTS", app.TTS_MODES, "kokoro"), "none"
+            )
+
+    def test_default_when_env_unset_or_empty(self):
+        with patch.dict("os.environ", {"LOCAL_COACH_TTS": ""}):
+            self.assertEqual(
+                app.resolve_mode(None, "LOCAL_COACH_TTS", app.TTS_MODES, "kokoro"), "kokoro"
+            )
+
+    def test_invalid_env_value_exits(self):
+        with patch.dict("os.environ", {"LOCAL_COACH_INPUT": "typing"}), \
+                patch.object(app.parser, "print_usage"), patch("sys.stderr"):
+            with self.assertRaises(SystemExit):
+                app.resolve_mode(None, "LOCAL_COACH_INPUT", app.INPUT_MODES, "voice")
+
+
+class TestReadTurn(unittest.TestCase):
+    """Tests for read_turn(), which chooses between typed and spoken input."""
+
+    def test_text_mode_returns_typed_input(self):
+        with patch.object(app, "input_mode", "text"), \
+                patch.object(app.console, "input", return_value="  hello  "), \
+                patch.object(app, "record_and_transcribe") as record:
+            self.assertEqual(app.read_turn(), "hello")
+        record.assert_not_called()
+
+    def test_voice_mode_typed_text_skips_recording(self):
+        with patch.object(app, "input_mode", "voice"), \
+                patch.object(app.console, "input", return_value="typed instead"), \
+                patch.object(app, "record_and_transcribe") as record:
+            self.assertEqual(app.read_turn(), "typed instead")
+        record.assert_not_called()
+
+    def test_voice_mode_empty_line_records(self):
+        with patch.object(app, "input_mode", "voice"), \
+                patch.object(app.console, "input", return_value=""), \
+                patch.object(app, "record_and_transcribe", return_value=" spoken words "):
+            self.assertEqual(app.read_turn(), "spoken words")
+
+
+class TestRespond(unittest.TestCase):
+    """Tests for respond(), which routes the reply to the selected output mode."""
+
+    def test_routes_by_tts_mode(self):
+        cases = {
+            "none": "stream_llm_to_text",
+            "say": "stream_llm_to_say",
+            "kokoro": "stream_llm_to_kokoro",
+        }
+        for mode, target in cases.items():
+            with self.subTest(mode=mode), patch.object(app, "tts_mode", mode), \
+                    patch.object(app, target, return_value="reply") as handler:
+                self.assertEqual(app.respond("hi"), "reply")
+                self.assertEqual(handler.call_args.args[0], "hi")
 
 
 if __name__ == "__main__":

@@ -35,7 +35,9 @@ from langchain_ollama import OllamaLLM
 from tts import KokoroTTS
 
 console = Console()
-stt = whisper.load_model("tiny.en")
+
+TTS_MODES = ["none", "kokoro", "say"]
+INPUT_MODES = ["voice", "text"]
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description="Local Voice Assistant (Kokoro TTS)")
@@ -43,8 +45,13 @@ parser.add_argument("--model", type=str, default=None, help="Ollama model name (
 parser.add_argument("--provider", type=str, default="ollama", choices=["ollama"],
                     help="LLM provider: only 'ollama' (local). Cloud providers removed to keep chat data local.")
 parser.add_argument("--no-tts", action="store_true", help="Disable TTS (alias for --tts none)")
-parser.add_argument("--tts", type=str, default=None, choices=["none", "kokoro", "say"],
-                    help="TTS backend: 'none' (text only), 'kokoro' (MLX, default), 'say' (macOS built-in)")
+parser.add_argument("--tts", type=str, default=None, choices=TTS_MODES,
+                    help="TTS backend: 'none' (text only), 'kokoro' (MLX, default), 'say' (macOS built-in). "
+                         "Defaults to $LOCAL_COACH_TTS or 'kokoro'.")
+parser.add_argument("--input", type=str, default=None, choices=INPUT_MODES,
+                    help="'voice' (default): type a message or press Enter to record. "
+                         "'text': keyboard only; skips loading Whisper and the microphone. "
+                         "Defaults to $LOCAL_COACH_INPUT or 'voice'.")
 parser.add_argument("--kokoro-voice", type=str,
                     default=os.environ.get("LOCAL_COACH_KOKORO_VOICE", "bf_emma"),
                     help="Kokoro voice id (e.g. bf_emma, af_heart, am_adam). "
@@ -55,13 +62,26 @@ parser.add_argument("--say-rate", type=int, default=None, help="macOS 'say' word
 parser.add_argument("--debug", action="store_true", help="Print timing info for each pipeline stage")
 args = parser.parse_args()
 
-# Resolve TTS mode: explicit --tts wins; otherwise --no-tts → 'none'; default kokoro.
-if args.tts is not None:
-    tts_mode = args.tts
-elif args.no_tts:
+
+def resolve_mode(flag: str | None, env_var: str, choices: list[str], default: str) -> str:
+    """Pick a mode from the explicit flag, then $env_var, then the default."""
+    if flag is not None:
+        return flag
+    value = os.environ.get(env_var) or default
+    if value not in choices:
+        parser.error(f"${env_var} must be one of {', '.join(choices)} (got {value!r})")
+    return value
+
+
+# Explicit --tts wins; otherwise --no-tts → 'none'; otherwise $LOCAL_COACH_TTS or kokoro.
+if args.tts is None and args.no_tts:
     tts_mode = "none"
 else:
-    tts_mode = "kokoro"
+    tts_mode = resolve_mode(args.tts, "LOCAL_COACH_TTS", TTS_MODES, "kokoro")
+input_mode = resolve_mode(args.input, "LOCAL_COACH_INPUT", INPUT_MODES, "voice")
+
+# Whisper is only needed when the user can speak their input.
+stt = whisper.load_model("tiny.en") if input_mode == "voice" else None
 
 def dlog(msg: str) -> None:
     """Debug log with monotonic timestamp."""
@@ -143,6 +163,7 @@ def transcribe(audio_np: np.ndarray) -> str:
     Returns:
         str: The transcribed text.
     """
+    assert stt is not None, "Whisper was not loaded (--input text)"
     t0 = time.monotonic()
     result = stt.transcribe(audio_np, fp16=False)  # Set fp16=True if using a GPU
     text = result["text"].strip()
@@ -336,6 +357,61 @@ def stream_llm_to_kokoro(text: str, voice: str) -> str:
     return result
 
 
+def record_and_transcribe() -> str:
+    """Record from the microphone until Enter is pressed, then transcribe. Returns '' if nothing was heard."""
+    data_queue = Queue()  # type: ignore[var-annotated]
+    stop_event = threading.Event()
+    recording_thread = threading.Thread(
+        target=record_audio,
+        args=(stop_event, data_queue),
+    )
+    recording_thread.start()
+
+    input()
+    stop_event.set()
+    recording_thread.join()
+
+    audio_data = b"".join(list(data_queue.queue))
+    audio_np = (
+        np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+    )
+
+    if audio_np.size == 0:
+        console.print(
+            "[red]No audio recorded. Please ensure your microphone is working."
+        )
+        return ""
+
+    with console.status("Transcribing...", spinner="dots"):
+        text = transcribe(audio_np)
+    console.print(f"[yellow]You: {text}")
+    return text
+
+
+def read_turn() -> str:
+    """
+    Get the user's next message. In voice mode, typed text is sent as-is and an
+    empty line starts a recording; in text mode, input is keyboard only.
+    """
+    if input_mode == "text":
+        return console.input("[yellow]You: ").strip()
+    typed = console.input(
+        "🎤 Type a message, or press Enter to record (Enter again to stop): "
+    ).strip()
+    if typed:
+        return typed
+    return record_and_transcribe().strip()
+
+
+def respond(text: str) -> str:
+    """Send the user's message to the LLM and deliver the reply via the selected TTS mode."""
+    if tts_mode == "none":
+        return stream_llm_to_text(text)
+    if tts_mode == "say":
+        return stream_llm_to_say(text, say_voice=args.say_voice, say_rate=args.say_rate)
+    return stream_llm_to_kokoro(text, voice=args.kokoro_voice)
+
+
 if __name__ == "__main__":
     console.print("[cyan]🤖 Local Voice Assistant (Kokoro TTS)")
     console.print("[cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -349,6 +425,10 @@ if __name__ == "__main__":
     else:
         console.print(f"[green]TTS: Kokoro (voice: {args.kokoro_voice}, speed: {args.kokoro_speed})")
 
+    if input_mode == "text":
+        console.print("[green]Input: keyboard only")
+    else:
+        console.print("[green]Input: type a message, or press Enter to speak")
     console.print(f"[blue]LLM model: {args.model or 'coach'}")
     console.print(f"[blue]LLM provider: {args.provider}")
     if args.debug:
@@ -358,48 +438,11 @@ if __name__ == "__main__":
 
     try:
         while True:
-            console.input(
-                "🎤 Press Enter to start recording, then press Enter again to stop."
-            )
+            text = read_turn()
+            if text:
+                respond(text)
 
-            data_queue = Queue()  # type: ignore[var-annotated]
-            stop_event = threading.Event()
-            recording_thread = threading.Thread(
-                target=record_audio,
-                args=(stop_event, data_queue),
-            )
-            recording_thread.start()
-
-            input()
-            stop_event.set()
-            recording_thread.join()
-
-            audio_data = b"".join(list(data_queue.queue))
-            audio_np = (
-                np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
-            )
-
-            if audio_np.size > 0:
-                with console.status("Transcribing...", spinner="dots"):
-                    text = transcribe(audio_np)
-                console.print(f"[yellow]You: {text}")
-
-                if tts_mode == "none":
-                    response = stream_llm_to_text(text)
-                elif tts_mode == "say":
-                    response = stream_llm_to_say(
-                        text,
-                        say_voice=args.say_voice,
-                        say_rate=args.say_rate,
-                    )
-                else:
-                    response = stream_llm_to_kokoro(text, voice=args.kokoro_voice)
-            else:
-                console.print(
-                    "[red]No audio recorded. Please ensure your microphone is working."
-                )
-
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
         console.print("\n[red]Exiting...")
         os._exit(0)
 
