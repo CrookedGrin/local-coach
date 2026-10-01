@@ -1,4 +1,4 @@
-PHONY: hello
+.PHONY: hello setup lint test
 
 RED=\033[0;31m
 GREEN=\033[0;32m
@@ -18,5 +18,15 @@ hello:
 
 lint:
 	@echo "Running linter..."
-	@source .venv/bin/activate && pre-commit run --all-files
+	@uv run pre-commit run --all-files
 	@echo "Done."
+
+setup:
+	@echo "Installing Python dependencies..."
+	@uv sync
+	@uv run pre-commit install
+	@echo "Downloading models..."
+	@uv run python scripts/download_models.py
+
+test:
+	@uv run pytest -q

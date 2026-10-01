@@ -288,6 +288,7 @@ def stream_llm_to_kokoro(text: str, voice: str) -> str:
     Kokoro synthesis + playback on the main thread. MLX streams are tied to
     the thread that loaded the model, so all `mx.*` calls must happen here.
     """
+    assert tts is not None, "Kokoro TTS was not loaded"
     chat_history.append(HumanMessage(content=text))
     sentence_queue: Queue = Queue()
     full_text_parts: list[str] = []
