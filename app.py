@@ -95,6 +95,10 @@ tts = (
     else None
 )
 
+# Output mode that /unmute restores. Starting with --no-tts unmutes to Kokoro.
+unmuted_tts_mode = tts_mode if tts_mode != "none" else "kokoro"
+COMMANDS_HELP = "/mute (read replies), /unmute (hear replies), /help"
+
 
 def create_llm(provider: str, model: str | None = None):
     """
@@ -412,6 +416,36 @@ def respond(text: str) -> str:
     return stream_llm_to_kokoro(text, voice=args.kokoro_voice)
 
 
+def handle_command(text: str) -> bool:
+    """
+    Handle a typed /command. Returns True if `text` was a command, in which
+    case it must not be sent to the LLM.
+    """
+    global tts_mode, tts
+    if not text.startswith("/"):
+        return False
+    command = text.split()[0].lower()
+    if command == "/mute":
+        tts_mode = "none"
+        console.print("[yellow]Muted. Replies will stream as text; type /unmute to hear them again.")
+    elif command == "/unmute":
+        if unmuted_tts_mode == "kokoro" and tts is None:
+            # Loaded here on the main thread, which MLX requires for synthesis later.
+            try:
+                with console.status("Loading Kokoro...", spinner="dots"):
+                    tts = KokoroTTS(default_voice=args.kokoro_voice, speed=args.kokoro_speed)
+            except Exception as e:
+                console.print(f"[red]Couldn't load Kokoro, staying muted: {e}")
+                return True
+        tts_mode = unmuted_tts_mode
+        console.print(f"[green]Unmuted. Replies will be spoken ({tts_mode}).")
+    elif command == "/help":
+        console.print(f"[cyan]Commands: {COMMANDS_HELP}")
+    else:
+        console.print(f"[red]Unknown command {command}. Commands: {COMMANDS_HELP}")
+    return True
+
+
 if __name__ == "__main__":
     console.print("[cyan]🤖 Local Voice Assistant (Kokoro TTS)")
     console.print("[cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -434,12 +468,13 @@ if __name__ == "__main__":
     if args.debug:
         console.print("[magenta]Debug timing enabled")
     console.print("[cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    console.print(f"[cyan]Commands: {COMMANDS_HELP}")
     console.print("[cyan]Press Ctrl+C to exit.\n")
 
     try:
         while True:
             text = read_turn()
-            if text:
+            if text and not handle_command(text):
                 respond(text)
 
     except (KeyboardInterrupt, EOFError):

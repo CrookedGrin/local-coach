@@ -197,5 +197,54 @@ class TestRespond(unittest.TestCase):
                 self.assertEqual(handler.call_args.args[0], "hi")
 
 
+class TestHandleCommand(unittest.TestCase):
+    """Tests for handle_command(), the /mute and /unmute switches."""
+
+    def setUp(self):
+        patchers = [
+            patch.object(app, "tts_mode", "kokoro"),
+            patch.object(app, "tts", MagicMock()),
+            patch.object(app, "unmuted_tts_mode", "kokoro"),
+            patch.object(app, "console"),
+        ]
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_plain_text_is_not_a_command(self):
+        self.assertFalse(app.handle_command("hello /mute"))
+        self.assertEqual(app.tts_mode, "kokoro")
+
+    def test_mute_then_unmute(self):
+        self.assertTrue(app.handle_command("/mute"))
+        self.assertEqual(app.tts_mode, "none")
+        self.assertTrue(app.handle_command("/unmute"))
+        self.assertEqual(app.tts_mode, "kokoro")
+
+    def test_unmute_restores_say(self):
+        with patch.object(app, "unmuted_tts_mode", "say"):
+            app.handle_command("/mute")
+            app.handle_command("/UNMUTE")
+            self.assertEqual(app.tts_mode, "say")
+
+    def test_unmute_loads_kokoro_if_started_muted(self):
+        with patch.object(app, "tts_mode", "none"), patch.object(app, "tts", None), \
+                patch.object(app, "KokoroTTS") as kokoro:
+            app.handle_command("/unmute")
+            kokoro.assert_called_once()
+            self.assertIs(app.tts, kokoro.return_value)
+            self.assertEqual(app.tts_mode, "kokoro")
+
+    def test_unmute_stays_muted_if_kokoro_fails_to_load(self):
+        with patch.object(app, "tts_mode", "none"), patch.object(app, "tts", None), \
+                patch.object(app, "KokoroTTS", side_effect=RuntimeError("not cached")):
+            self.assertTrue(app.handle_command("/unmute"))
+            self.assertEqual(app.tts_mode, "none")
+
+    def test_unknown_command_is_not_sent_to_llm(self):
+        self.assertTrue(app.handle_command("/bogus"))
+        self.assertEqual(app.tts_mode, "kokoro")
+
+
 if __name__ == "__main__":
     unittest.main()

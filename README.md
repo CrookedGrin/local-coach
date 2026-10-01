@@ -82,6 +82,16 @@ Input and output are independent, so you can use any combination:
 
 In the default voice mode you can mix typing and speaking turn by turn. `--input text` is keyboard only: it skips loading Whisper and never opens the microphone, so macOS won't ask for mic access. To make a combination your default, set `LOCAL_COACH_INPUT` and `LOCAL_COACH_TTS` (see [Configuration](#configuration)).
 
+You can also switch narration on and off mid-conversation by typing a command at the prompt:
+
+| Command | Effect |
+|---|---|
+| `/mute` | Replies stream as text from now on |
+| `/unmute` | Replies are spoken again, using the `--tts` backend you started with. If you started with `--no-tts`, Kokoro is loaded on first unmute. |
+| `/help` | List the commands |
+
+Commands aren't sent to the coach, and they work in both input modes.
+
 More options:
 
 ```bash
