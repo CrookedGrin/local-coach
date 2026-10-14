@@ -1,291 +1,161 @@
-## Build your own voice assistant and run it locally: Whisper + Ollama + ChatterBox
+## Local Coach
 
-> Original article: https://blog.duy-huynh.com/build-your-own-voice-assistant-and-run-it-locally/
->
-> **Updated May 2025**: Now using [Chatterbox TTS](https://github.com/resemble-ai/chatterbox), a state-of-the-art open-source TTS model from Resemble AI!
->
-> The original implementation using Bark has been preserved in the `archive-2025-05-29` branch for reference.
+A private, voice-driven personal coach that runs entirely on your Mac. You talk, it listens, and it talks back. Speech recognition, the language model and speech synthesis all run locally, so nothing you say leaves the machine.
 
-[![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-yellow.svg)](https://www.buymeacoffee.com/vndee)
+> Forked from [vndee/local-talking-llm](https://github.com/vndee/local-talking-llm), which accompanies the article [Build your own voice assistant and run it locally](https://blog.duy-huynh.com/build-your-own-voice-assistant-and-run-it-locally/).
 
-
-After my latest post about how to build your own RAG and run it locally. Today, we're taking it a step further by not only implementing the conversational abilities of large language models but also adding listening and speaking capabilities. The idea is straightforward: we are going to create a voice assistant reminiscent of Jarvis or Friday from the iconic Iron Man movies, which can operate offline on your computer.
-
-**New Features with ChatterBox:**
-- 🎯 **Voice Cloning**: Clone any voice with just a short audio sample
-- 🎭 **Emotion Control**: Adjust emotional expressiveness of responses
-- 🚀 **Better Performance**: 0.5B parameter model with faster inference
-- 💧 **Watermarked Audio**: Built-in neural watermarking for authenticity
-
-### Techstack
-First, you should set up a virtual Python environment. You have several options for this, including pyenv, virtualenv, poetry, and others that serve a similar purpose. Personally, I'll use Poetry for this tutorial due to my personal preferences. Here are several crucial libraries you'll need to install:
-
-- **rich**: For a visually appealing console output.
-- **openai-whisper**: A robust tool for speech-to-text conversion.
-- **chatterbox-tts**: State-of-the-art text-to-speech synthesis with voice cloning and emotion control.
-- **langchain**: A straightforward library for interfacing with Large Language Models (LLMs).
-- **sounddevice**, **pyaudio**, and **speechrecognition**: Essential for audio recording and playback.
-
-For a detailed list of dependencies, refer to the link here.
-
-The most critical component here is the Large Language Model (LLM) backend. We use **Ollama** to run LLMs locally — no cloud providers are wired in, so chat data never leaves the machine. If Ollama is new to you, I recommend checking out my previous article on offline RAG: "Build Your Own RAG and Run It Locally: Langchain + Ollama + Streamlit". Download the Ollama application, pull your preferred model, and run it.
-
-### Architecture
-Okay, if everything has been set up, let's proceed to the next step. Below is the overall architecture of our application, which fundamentally comprises 3 main components:
-
-- **Speech Recognition**: Utilizing OpenAI's Whisper, we convert spoken language into text. Whisper's training on diverse datasets ensures its proficiency across various languages and dialects.
-- **Conversational Chain**: For the conversational capabilities, we'll employ the Langchain interface with a local LLM backend served by Ollama (e.g., Gemma3, Qwen3, Llama-4). Everything stays on the machine.
-- **Speech Synthesizer**: The transformation of text to speech is achieved through Chatterbox TTS, a state-of-the-art model from Resemble AI, renowned for its lifelike speech production and voice cloning capabilities.
-
-The workflow is straightforward: record speech, transcribe to text, generate a response using an LLM, and vocalize the response using ChatterBox.
+### How it works
 
 ```mermaid
-flowchart TD
-    A[🎤 User Speech Input] --> B[Speech Recognition<br/>OpenAI Whisper]
-    B --> C[📝 Text Transcription]
-    C --> D[Conversational Chain<br/>Langchain + Ollama<br/>Gemma3 / Qwen3 / Llama-4]
-    D --> E[🤖 Generated Response]
-    E --> F[Speech Synthesizer<br/>Chatterbox TTS]
-    F --> G[🔊 Audio Output]
-    G --> H[👤 User Hears Response]
-
-    style A fill:#e1f5fe
-    style B fill:#f3e5f5
-    style C fill:#e8f5e8
-    style D fill:#fff3e0
-    style E fill:#e8f5e8
-    style F fill:#f3e5f5
-    style G fill:#e1f5fe
-    style H fill:#fce4ec
+flowchart LR
+    A[🎤 Microphone] --> B[Whisper tiny.en<br/>speech-to-text]
+    K[⌨️ Keyboard] --> C
+    B --> C[Ollama 'coach' model<br/>qwen3:8b + Modelfile prompt]
+    C -->|streamed sentence by sentence| D[Kokoro-82M on MLX<br/>text-to-speech]
+    D --> E[🔊 Speakers]
+    C -.->|--no-tts| T[🖥️ Terminal text]
 ```
+
+1. At the prompt, either type a message or press Enter to start recording and Enter again to stop. [Whisper](https://github.com/openai/whisper) transcribes recordings.
+2. The transcript and the conversation so far go to a local [Ollama](https://ollama.com) model through LangChain. The default `coach` model is `qwen3:8b` with the coaching system prompt and parameters defined in [`Modelfile`](Modelfile).
+3. The reply streams back token by token. As each sentence completes, it is spoken by [Kokoro](https://huggingface.co/prince-canuma/Kokoro-82M) via [mlx-audio](https://github.com/Blaizzy/mlx-audio), so playback starts before the full reply has been generated. Markdown is stripped before speaking. With `--no-tts`, the reply is printed instead.
+
+Conversation history is held in memory only and is gone when the app exits.
 
 ### Installation
 
-**⚠️ Important**: We strongly recommend using [uv](https://docs.astral.sh/uv/) for dependency management instead of pip with `requirements.txt`. The `requirements.txt` file was generated by `uv pip freeze` and contains pinned versions that may not install correctly across different systems.
-
-#### Option 1: Using uv (Recommended)
+Requires macOS on Apple Silicon (Kokoro runs on MLX), [uv](https://docs.astral.sh/uv/), and [Ollama](https://ollama.com). The project is pinned to Python 3.13 via `.python-version`; uv downloads it automatically if needed.
 
 ```bash
-# Install uv if you haven't already
-curl -LsSf https://astral.sh/uv/install.sh | sh
-# or on macOS: brew install uv
-# or on Windows: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+brew install uv ollama
+ollama serve            # or launch the Ollama app; leave it running
 
-# Clone the repository
-git clone https://github.com/vndee/local-talking-llm.git
-cd local-talking-llm
+git clone https://github.com/CrookedGrin/local-coach.git
+cd local-coach
 
-# Install dependencies using uv (recommended)
-uv sync
-
-# Activate the virtual environment
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Download NLTK data (for sentence tokenization)
-python -c "import nltk; nltk.download('punkt_tab')"
+make setup
 ```
 
-#### Option 2: Using pip (Alternative)
+`make setup` runs `uv sync` and then [`scripts/download_models.py`](scripts/download_models.py), which downloads every model the app needs at runtime (about 5.5 GB in total):
 
-If you prefer to use pip, install directly from pyproject.toml:
+| Model | Size | Cache location |
+|---|---|---|
+| Whisper `tiny.en` (speech-to-text) | ~75 MB | `~/.cache/whisper` |
+| Kokoro-82M + voices (text-to-speech) | ~380 MB | `~/.cache/huggingface` |
+| `qwen3:8b`, built into the `coach` model from `Modelfile` | ~5 GB | Ollama's model store |
+
+> **Why a separate download step?** `app.py` sets `HF_HUB_OFFLINE=1` on every launch to skip Hugging Face's network check, so it cannot download Kokoro itself on a first run. If you skip `make setup`, the app fails with `LocalEntryNotFoundError`.
+
+#### Using pip instead of uv
+
+`requirements.txt` is exported from `uv.lock` and pins the same versions. Regenerate it after changing dependencies with:
 
 ```bash
-# Clone the repository
-git clone https://github.com/vndee/local-talking-llm.git
-cd local-talking-llm
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install from pyproject.toml (NOT requirements.txt)
-pip install -e .
-
-# Download NLTK data
-python -c "import nltk; nltk.download('punkt')"
+uv export --format requirements-txt --no-hashes --no-emit-project --no-annotate -o requirements.txt
 ```
 
-#### Install and Setup Ollama
+To install with pip:
 
 ```bash
-# Install and start Ollama
-# Follow instructions at https://ollama.ai
-ollama pull qwen3:8b  # or any other model you prefer
-
-# Build the bundled "coach" model (system prompt lives in ./Modelfile)
-ollama create coach -f Modelfile
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install --ignore-requires-python -r requirements.txt
+python scripts/download_models.py
 ```
+
+`--ignore-requires-python` is needed because `misaki` 0.9.4 declares `Python <3.13` even though it works on 3.13. uv ignores such upper bounds; pip does not.
 
 ### Usage
 
-#### Basic Usage
 ```bash
-python app.py
+uv run python app.py
 ```
 
-#### With Voice Cloning
-Record a 10-30 second audio sample of the voice you want to clone, then:
+Input and output are independent, so you can use any combination:
+
+| You want | Run |
+|---|---|
+| Talk, hear replies | `uv run python app.py` |
+| Type, hear replies | the same; type at the prompt instead of pressing Enter |
+| Talk, read replies | `uv run python app.py --no-tts` |
+| Type, read replies | `uv run python app.py --input text --no-tts` |
+
+In the default voice mode you can mix typing and speaking turn by turn. `--input text` is keyboard only: it skips loading Whisper and never opens the microphone, so macOS won't ask for mic access. To make a combination your default, set `LOCAL_COACH_INPUT` and `LOCAL_COACH_TTS` (see [Configuration](#configuration)).
+
+You can also switch narration on and off mid-conversation by typing a command at the prompt:
+
+| Command | Effect |
+|---|---|
+| `/mute` | Replies stream as text from now on |
+| `/unmute` | Replies are spoken again, using the `--tts` backend you started with. If you started with `--no-tts`, Kokoro is loaded on first unmute. |
+| `/help` | List the commands |
+
+Commands aren't sent to the coach, and they work in both input modes.
+
+More options:
+
 ```bash
-python app.py --voice path/to/voice_sample.wav
+uv run python app.py --kokoro-voice af_heart --kokoro-speed 1.1   # different Kokoro voice
+uv run python app.py --tts say --say-voice Samantha                  # macOS built-in TTS
+uv run python app.py --no-tts                                        # text replies only
+uv run python app.py --model qwen3:8b                                # skip the coach system prompt
+uv run python app.py --debug                                         # per-stage timings
 ```
 
-#### With Custom Settings
+Press Ctrl+C (or Ctrl+D at the prompt) to quit.
+
+### Configuration
+
+Command-line flags:
+
+- `--model`: Ollama model to use (default: `coach`, built from `Modelfile`)
+- `--input`: `voice` (default; type a message or press Enter to record) or `text` (keyboard only, no Whisper or microphone)
+- `--tts`: `kokoro` (default), `say` (macOS), or `none`; `--no-tts` is an alias for `none`
+- `--kokoro-voice`: Kokoro voice id (default: `bf_emma`). The prefix sets the accent: `af_`/`am_` American, `bf_`/`bm_` British. The full list is in the [voices folder](https://huggingface.co/prince-canuma/Kokoro-82M/tree/main/voices).
+- `--kokoro-speed`: Kokoro speed multiplier (default: `1.0`)
+- `--say-voice`, `--say-rate`: voice and words-per-minute for `--tts say` (list voices with `say -v '?'`)
+- `--debug`: print timing for each pipeline stage
+
+Environment variables set your defaults; a command-line flag always overrides them. Export them in your shell profile (e.g. `~/.zshrc`); the app does not read a `.env` file.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `LOCAL_COACH_INPUT` | `voice` | Default for `--input` (`voice` or `text`) |
+| `LOCAL_COACH_TTS` | `kokoro` | Default for `--tts` (`kokoro`, `say` or `none`) |
+| `LOCAL_COACH_KOKORO_VOICE` | `bf_emma` | Default for `--kokoro-voice` |
+| `LOCAL_COACH_HF_ONLINE` | unset | Set to `1` to allow Hugging Face network access, e.g. to pull a newer Kokoro revision |
+
+#### Changing the coach's personality
+
+The system prompt, base model and sampling parameters live in [`Modelfile`](Modelfile), not in Python. After editing it, rebuild the model:
+
 ```bash
-# Adjust emotion and pacing
-python app.py --exaggeration 0.7 --cfg-weight 0.3
-
-# Use a different LLM model
-python app.py --model codellama
-
-# Save generated voice samples
-python app.py --save-voice
+ollama create coach -f Modelfile
 ```
 
-### Configuration Options
+To try a different base model, change the `FROM` line (for example `FROM gemma3:12b`) and rebuild; Ollama pulls the new base model automatically.
 
-- `--provider`: LLM provider (`ollama` only — cloud providers were removed so chat data stays local)
-- `--voice`: Path to audio file for voice cloning
-- `--exaggeration`: Emotion intensity (0.0-1.0, default: 0.5)
-  - Lower values (0.3-0.4): Calmer, more neutral delivery
-  - Higher values (0.7-0.9): More expressive and emotional
-- `--cfg-weight`: Controls pacing and delivery style (0.0-1.0, default: 0.5)
-  - Lower values: Faster, more dynamic speech
-  - Higher values: Slower, more deliberate speech
-- `--model`: Ollama model to use (default: `coach`, built from the bundled `Modelfile`)
-- `--save-voice`: Save generated audio responses to `voices/` directory
+### Development
 
-### Implementation Details
-
-#### TextToSpeechService with ChatterBox
-The new TextToSpeechService leverages ChatterBox's advanced features:
-
-```python
-from chatterbox.tts import ChatterboxTTS
-
-class TextToSpeechService:
-    def __init__(self, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
-        self.device = device
-        self.model = ChatterboxTTS.from_pretrained(device=device)
-        self.sample_rate = self.model.sr
-
-    def synthesize(self, text: str, audio_prompt_path: str = None,
-                  exaggeration: float = 0.5, cfg_weight: float = 0.5):
-        wav = self.model.generate(
-            text,
-            audio_prompt_path=audio_prompt_path,
-            exaggeration=exaggeration,
-            cfg_weight=cfg_weight
-        )
-        return self.sample_rate, wav.squeeze().cpu().numpy()
+```bash
+make test          # unit tests (no models or Ollama needed)
+make lint          # every pre-commit hook: ruff, mypy, gitleaks, whitespace, pytest
 ```
 
-Key improvements over the previous Bark implementation:
-- **Voice Cloning**: Pass an audio file to clone any voice
-- **Emotion Control**: Adjust expressiveness with the `exaggeration` parameter
-- **Better Quality**: ChatterBox produces more natural-sounding speech
-- **Faster Inference**: Smaller model size (0.5B vs Bark's larger models)
-
-#### Dynamic Emotion Analysis
-The app now includes automatic emotion detection to make responses more expressive:
-
-```python
-def analyze_emotion(text: str) -> float:
-    emotional_keywords = ['amazing', 'terrible', 'love', 'hate', 'excited',
-                         'sad', 'happy', 'angry', '!', '?!']
-    emotion_score = 0.5
-    for keyword in emotional_keywords:
-        if keyword in text.lower():
-            emotion_score += 0.1
-    return min(0.9, max(0.3, emotion_score))
-```
-
-### Tips for Best Results
-
-1. **Voice Cloning**:
-   - Use a clear 10-30 second audio sample
-   - Ensure the sample has minimal background noise
-   - The voice should speak naturally in the sample
-
-2. **Emotion Control**:
-   - For general conversation: `exaggeration=0.5, cfg_weight=0.5`
-   - For dramatic/expressive speech: `exaggeration=0.7+, cfg_weight=0.3`
-   - For calm/professional tone: `exaggeration=0.3, cfg_weight=0.7`
-
-3. **Performance**:
-   - Use CUDA if available for faster inference
-   - The first generation might be slower due to model loading
-   - Consider using smaller Whisper models ("tiny.en" or "base.en") for faster transcription
-
-### Scaling to Production
-
-For those aiming to elevate this application to a production-ready status, consider:
-
-- **Performance Optimization**:
-  - Use optimized inference engines (ONNX, TensorRT)
-  - Implement model quantization for faster inference
-  - Add caching for frequently used phrases
-
-- **Enhanced Features**:
-  - Multi-speaker support with voice profiles
-  - Real-time voice conversion
-  - Web interface with real-time streaming
-
-- **Voice Database**:
-  - Create a library of voice samples
-  - Implement voice selection UI
-  - Add voice mixing capabilities
-
-- **API Service**:
-  - RESTful API for TTS requests
-  - WebSocket support for real-time communication
-  - Rate limiting and authentication
+Tests run locally rather than in CI, because they need the full ~1.6 GB Python environment. `make setup` installs a git pre-commit hook that runs ruff, mypy and the test suite on every commit touching Python files, and blocks the commit if any of them fail. If you cloned before this hook existed, install it with `uv run pre-commit install`.
 
 ### Troubleshooting
 
-#### Dependency Installation Issues
-
-**Problem**: `requirements.txt` installation fails with errors like:
-- `ERROR: Could not find a version that satisfies the requirement cPython==0.0.6`
-- `ModuleNotFoundError: No module named 'distutils'`
-- Various version conflicts
-
-**Solution**: The `requirements.txt` file was generated by `uv pip freeze` and contains exact versions that may not work across different systems. Use one of these alternatives:
-
-1. **Use uv (Recommended)**:
-   ```bash
-   uv sync
-   ```
-
-2. **Use pip with pyproject.toml**:
-   ```bash
-   pip install -e .
-   ```
-
-3. **Manual installation of core packages**:
-   ```bash
-   pip install chatterbox-tts langchain-ollama openai-whisper sounddevice rich nltk
-   ```
-
-#### Runtime Issues
-
-- **CUDA out of memory**: Use CPU mode or reduce model precision
-- **Microphone not working**: Check system permissions and device settings
-- **Slow inference**: Ensure you're using GPU if available, consider using smaller models
-- **Voice cloning quality**: Use higher quality audio samples with clear speech
-- **Import errors**: Make sure you activated the virtual environment before running the app
-
-### Conclusion
-
-With the integration of ChatterBox, we've significantly enhanced our local voice assistant. The addition of voice cloning and emotion control opens up new possibilities for creating personalized and expressive AI assistants. Whether you're building a personal Jarvis, creating content, or developing voice-enabled applications, this updated stack provides a powerful foundation.
-
-The combination of Whisper's robust speech recognition, Ollama's flexible LLM serving, and ChatterBox's advanced TTS capabilities creates a fully-featured voice assistant that runs entirely offline. No cloud services, no API keys, just pure local AI power!
+- **`LocalEntryNotFoundError` / "outgoing traffic has been disabled"**: a model or voice isn't cached. Run `make setup`, or run once with `LOCAL_COACH_HF_ONLINE=1`.
+- **`ValueError: Model type kokoro not supported`**: mlx-audio hides the real import error behind this message. Run `uv run python -c "import mlx_audio.tts.models.kokoro"` to see the underlying error.
+- **Connection refused on port 11434**: the Ollama server isn't running. Start it with `ollama serve` or open the Ollama app.
+- **`model "coach" not found`**: run `ollama create coach -f Modelfile`.
+- **"No audio recorded" or silent transcripts**: grant your terminal microphone access in System Settings → Privacy & Security → Microphone.
+- **Building `tiktoken` asks for a Rust compiler**: you're on a Python version without prebuilt wheels. Use the pinned 3.13 (`uv python pin 3.13`, then `uv sync`).
 
 ### Resources
 
-- [ChatterBox GitHub](https://github.com/resemble-ai/chatterbox)
-- [Ollama](https://ollama.ai)
+- [Kokoro-82M (MLX)](https://huggingface.co/prince-canuma/Kokoro-82M) and [mlx-audio](https://github.com/Blaizzy/mlx-audio)
+- [Ollama](https://ollama.com) and the [Modelfile reference](https://github.com/ollama/ollama/blob/main/docs/modelfile.md)
 - [Whisper](https://github.com/openai/whisper)
-- [Original Blog Post](https://blog.duy-huynh.com/build-your-own-voice-assistant-and-run-it-locally/)
-
----
-
+- [Original blog post](https://blog.duy-huynh.com/build-your-own-voice-assistant-and-run-it-locally/)

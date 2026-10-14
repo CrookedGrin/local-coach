@@ -19,10 +19,15 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pre-commit>=4.2.0",
+    "pytest>=9.0.3",
 ]
 
 [tool.uv.extra-build-dependencies]
-"openai-whisper" = ["setuptools"]
+"openai-whisper" = ["setuptools<81"]
 
 [tool.uv.sources]
 en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
+
+[tool.ruff.lint.per-file-ignores]
+# app.py sets HF_HUB_* env vars before importing libraries that read them.
+"app.py" = ["E402"]

@@ -20,3 +20,12 @@ repos:
    rev: v8.17.0
    hooks:
    - id: gitleaks
+-  repo: local
+   hooks:
+   -    id: pytest
+        name: pytest
+        # Tests run locally instead of in CI: they need the full ~1.6 GB env.
+        entry: uv run pytest -q
+        language: system
+        types: [python]
+        pass_filenames: false
